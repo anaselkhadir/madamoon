@@ -1,26 +1,122 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-ivory: #f7f6f2;
+  --color-pearl: #ffffff;
+  --color-ink: #111111;
+  --color-ink-soft: #55534e;
+  --color-gold: #d8c3a5;
+  --color-gold-deep: #b89e78;
+  --color-line: #ece8e1;
+  --font-serif: var(--font-cormorant);
+  --font-sans: var(--font-inter);
+  --ease-couture: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+:root {
+  color-scheme: light;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #f7f6f2;
+  color: #111111;
+  font-family: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: clip;
+}
+
+::selection {
+  background: #d8c3a5;
+  color: #111111;
+}
+
+/* ————— Film grain, fixed & inert ————— */
+.grain::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.028;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ————— Editorial reveal primitives (GSAP animates these) ————— */
+.reveal {
+  opacity: 0;
+  transform: translateY(56px);
+}
+
+.mask-img {
+  clip-path: inset(100% 0 0 0);
+}
+
+.mask-img img {
+  transform: scale(1.14);
+}
+
+/* ————— Hero entrance (CSS-first: paints without waiting for JS) ————— */
+@keyframes hero-rise {
+  from {
+    opacity: 0;
+    transform: translateY(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes hero-settle {
+  from {
+    transform: scale(1.12);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+.hero-rise {
+  animation: hero-rise 1.5s var(--ease-couture) both;
+}
+
+.hero-settle {
+  animation: hero-settle 2.6s var(--ease-couture) both;
+}
+
+/* ————— Micro-interactions ————— */
+.img-zoom img {
+  transition: transform 1.6s var(--ease-couture);
+}
+
+.img-zoom:hover img {
+  transform: scale(1.05);
+}
+
+.gold-rule {
+  background: linear-gradient(90deg, #d8c3a5, rgba(216, 195, 165, 0));
+}
+
+.no-js .reveal,
+.no-js .mask-img {
+  opacity: 1;
+  clip-path: none;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal,
+  .mask-img,
+  .mask-img img {
+    opacity: 1 !important;
+    transform: none !important;
+    clip-path: none !important;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
