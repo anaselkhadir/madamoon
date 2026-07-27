@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { RDV_URL } from "@/lib/site";
+import { AI_ENDPOINT, CATALOGUE_URL, RDV_URL, SUPABASE_ANON_KEY } from "@/lib/site";
 
 /*
- * Conseillère virtuelle MADAMOON — assistante guidée 100 % côté client.
- * Base de connaissances : page « Votre morphologie » + contenus réels du site.
+ * Élise — conseillère virtuelle MADAMOON.
+ * Conversation libre propulsée par l'IA (Supabase Edge Function → Claude),
+ * avec parcours guidé (diagnostic morphologie, FAQ, RDV) et repli scripté
+ * si l'IA est indisponible : la cliente n'est jamais laissée sans réponse.
  */
 
 type Option = { label: string; next?: string; href?: string };
 type Message = { from: "bot" | "user"; text?: string; rich?: React.ReactNode };
+type HistoryItem = { role: "user" | "assistant"; content: string };
 
 const MORPHOS: Record<
   string,
@@ -103,7 +106,60 @@ const FAQ: Record<string, { q: string; a: string }> = {
   },
 };
 
-const CATALOGUE_URL = "https://madamoon.fr/catalogue-des-robes/";
+const HOME_OPTIONS: Option[] = [
+  { label: "Trouver ma coupe idéale", next: "morpho" },
+  { label: "Prendre rendez-vous", next: "rdv" },
+  { label: "Questions pratiques", next: "faq" },
+];
+
+/* Repli hors-ligne : oriente par mots-clés vers la base de connaissances. */
+function offlineAnswer(input: string): { texts: string[]; options: Option[] } {
+  const q = input
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "");
+  const has = (...words: string[]) => words.some((w) => q.includes(w));
+
+  if (has("rendez", "rdv", "reserv", "essayage", "venir", "visite"))
+    return {
+      texts: [
+        "Avec plaisir ✨ Le showroom est privatisé pour vous pendant une heure, sur rendez-vous uniquement : lundi 12h–21h, mardi au samedi 10h–19h, au 234 rue du Faubourg Saint-Martin, Paris 10ᵉ.",
+      ],
+      options: [
+        { label: "Réserver en ligne", href: RDV_URL },
+        { label: "Appeler la boutique", href: "tel:+33641243847" },
+      ],
+    };
+  if (has("prix", "tarif", "cout", "coute", "budget", "cher"))
+    return { texts: [FAQ.prix.a], options: [{ label: "Prendre rendez-vous", next: "rdv" }] };
+  if (has("horaire", "adresse", "ouvert", "ou etes", "situ", "metro"))
+    return { texts: [FAQ.horaires.a], options: [{ label: "Prendre rendez-vous", next: "rdv" }] };
+  if (has("delai", "quand", "mois", "date", "temps"))
+    return { texts: [FAQ.delais.a], options: [{ label: "Prendre rendez-vous", next: "rdv" }] };
+  if (has("marque", "createur", "maison", "watters", "casablanca"))
+    return { texts: [FAQ.maisons.a], options: [{ label: "Voir le catalogue", href: CATALOGUE_URL }] };
+  if (has("morpho", "silhouette", "coupe", "taille", "corps", "quelle robe", "robe pour moi"))
+    return {
+      texts: [
+        "Chaque femme est unique : le plus simple est un petit diagnostic ensemble pour identifier la coupe qui vous sublimera. On commence ?",
+      ],
+      options: [{ label: "Lancer le diagnostic", next: "q1" }],
+    };
+  if (has("merci", "super", "parfait"))
+    return {
+      texts: ["Avec grand plaisir ✨ Je reste à votre écoute — et au plaisir de vous accueillir en boutique."],
+      options: HOME_OPTIONS,
+    };
+  return {
+    texts: [
+      "Je préfère vous répondre précisément plutôt que de m'avancer : le mieux est d'en parler de vive voix avec la boutique, ou je peux vous guider ici sur votre morphologie, nos prix et la prise de rendez-vous.",
+    ],
+    options: [
+      ...HOME_OPTIONS,
+      { label: "Appeler la boutique", href: "tel:+33641243847" },
+    ],
+  };
+}
 
 export default function Conseillere() {
   const [open, setOpen] = useState(false);
@@ -111,8 +167,10 @@ export default function Conseillere() {
   const [options, setOptions] = useState<Option[]>([]);
   const [typing, setTyping] = useState(false);
   const [started, setStarted] = useState(false);
+  const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const timeouts = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const history = useRef<HistoryItem[]>([]);
 
   const later = (fn: () => void, ms: number) => {
     timeouts.current.push(setTimeout(fn, ms));
@@ -125,14 +183,16 @@ export default function Conseillere() {
 
   useEffect(() => () => timeouts.current.forEach(clearTimeout), []);
 
-  const say = (texts: (string | React.ReactNode)[], opts: Option[], delay = 650) => {
+  const say = (texts: (string | { plain: string; rich: React.ReactNode })[], opts: Option[], delay = 650) => {
     setOptions([]);
     setTyping(true);
     texts.forEach((t, i) => {
       later(() => {
+        const plain = typeof t === "string" ? t : t.plain;
+        history.current.push({ role: "assistant", content: plain });
         setMessages((m) => [
           ...m,
-          typeof t === "string" ? { from: "bot", text: t } : { from: "bot", rich: t },
+          typeof t === "string" ? { from: "bot", text: t } : { from: "bot", rich: t.rich },
         ]);
         if (i === texts.length - 1) {
           setTyping(false);
@@ -147,21 +207,17 @@ export default function Conseillere() {
       case "root":
         say(
           [
-            "Bonjour ✨ Je suis la conseillère virtuelle de la maison MADAMOON.",
-            "Je peux vous aider à identifier la coupe qui vous sublimera le jour J, répondre à vos questions, ou organiser votre premier essayage privé. Par où commençons-nous ?",
+            "Bonjour, je suis Élise ✨ conseillère de la maison MADAMOON. Trouver la robe d'une vie, c'est mon métier — et ma plus grande joie.",
+            "Parlez-moi de votre mariage, posez-moi toutes vos questions… ou laissez-vous guider :",
           ],
-          [
-            { label: "Trouver ma coupe idéale", next: "morpho" },
-            { label: "Prendre rendez-vous", next: "rdv" },
-            { label: "Questions pratiques", next: "faq" },
-          ]
+          HOME_OPTIONS
         );
         break;
 
       case "morpho":
         say(
           [
-            "Chez MADAMOON, nous savons que chaque femme est unique : l'essentiel est de trouver la robe qui met en valeur votre silhouette tout en correspondant à votre personnalité.",
+            "Chaque femme est unique : l'essentiel est de trouver la robe qui met en valeur votre silhouette tout en vous ressemblant.",
             "Connaissez-vous déjà votre morphologie ?",
           ],
           [
@@ -187,7 +243,7 @@ export default function Conseillere() {
 
       case "q1":
         say(
-          ["Pas de panique, on vous guide pas à pas 🌿", "Comment décririez-vous vos épaules par rapport à vos hanches ?"],
+          ["Pas de panique, je vous guide pas à pas 🌿", "Comment décririez-vous vos épaules par rapport à vos hanches ?"],
           [
             { label: "Plus étroites que mes hanches", next: "result:A" },
             { label: "Plus larges que mes hanches", next: "result:V" },
@@ -227,18 +283,14 @@ export default function Conseillere() {
             { label: "Réserver en ligne", href: RDV_URL },
             { label: "Appeler la boutique", href: "tel:+33641243847" },
             { label: "Écrire à la maison", href: "mailto:contact@madamoon.fr?subject=Demande%20de%20rendez-vous%20%E2%80%94%20essayage%20priv%C3%A9" },
-            { label: "← Retour", next: "root" },
           ]
         );
         break;
 
       case "faq":
         say(
-          ["Bien sûr — que souhaitez-vous savoir ?"],
-          [
-            ...Object.entries(FAQ).map(([k, v]) => ({ label: v.q, next: `faq:${k}` })),
-            { label: "← Retour", next: "root" },
-          ]
+          ["Bien sûr — que souhaitez-vous savoir ? Vous pouvez aussi me poser votre question librement."],
+          Object.entries(FAQ).map(([k, v]) => ({ label: v.q, next: `faq:${k}` }))
         );
         break;
 
@@ -247,25 +299,30 @@ export default function Conseillere() {
           const m = MORPHOS[node.slice(7)];
           say(
             [
-              <div key={m.name}>
-                <p className="font-serif text-lg font-normal italic text-ink">{m.name}</p>
-                <p className="mt-1 text-[13px] text-ink-soft">{m.desc}</p>
-                <p className="mt-3 text-[13px]">
-                  <span className="font-medium">L&rsquo;objectif :</span> {m.objectif}
-                </p>
-                <ul className="mt-3 space-y-1.5">
-                  {m.coupes.map((c) => (
-                    <li key={c} className="flex gap-2 text-[13px]">
-                      <span className="text-gold-deep">✦</span>
-                      <span>{c}</span>
-                    </li>
-                  ))}
-                </ul>
-                <p className="mt-3 border-t border-line pt-3 text-[13px]">
-                  <span className="font-medium">Dans notre collection :</span> {m.robes}.
-                </p>
-              </div>,
-              "Le plus beau reste l'essayage : nos conseillères vous guident en boutique selon votre morphologie, vos envies et votre personnalité — avec un peu de magie ✨",
+              {
+                plain: `${m.name}. ${m.desc} Objectif : ${m.objectif} Coupes recommandées : ${m.coupes.join(" ; ")}. Dans notre collection : ${m.robes}.`,
+                rich: (
+                  <div>
+                    <p className="font-serif text-lg font-normal italic text-ink">{m.name}</p>
+                    <p className="mt-1 text-[13px] text-ink-soft">{m.desc}</p>
+                    <p className="mt-3 text-[13px]">
+                      <span className="font-medium">L&rsquo;objectif :</span> {m.objectif}
+                    </p>
+                    <ul className="mt-3 space-y-1.5">
+                      {m.coupes.map((c) => (
+                        <li key={c} className="flex gap-2 text-[13px]">
+                          <span className="text-gold-deep">✦</span>
+                          <span>{c}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-3 border-t border-line pt-3 text-[13px]">
+                      <span className="font-medium">Dans notre collection :</span> {m.robes}.
+                    </p>
+                  </div>
+                ),
+              },
+              "Le plus beau reste l'essayage : je serai ravie de savoir que vous poussez la porte du showroom — mes collègues vous guideront selon votre morphologie, vos envies et votre personnalité ✨ Et si vous voulez affiner (style du mariage, tissus, encolures…), posez-moi vos questions ici !",
             ],
             [
               { label: "Prendre rendez-vous", next: "rdv" },
@@ -280,7 +337,6 @@ export default function Conseillere() {
             [f.a],
             [
               { label: "Prendre rendez-vous", next: "rdv" },
-              { label: "Autre question", next: "faq" },
               { label: "Trouver ma coupe idéale", next: "morpho" },
             ]
           );
@@ -289,11 +345,56 @@ export default function Conseillere() {
     }
   };
 
+  /* Texte libre → IA ; en cas d'échec, moteur local par mots-clés. */
+  const askAi = async (question: string) => {
+    setOptions([]);
+    setTyping(true);
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20000);
+      const res = await fetch(AI_ENDPOINT, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+          apikey: SUPABASE_ANON_KEY,
+        },
+        body: JSON.stringify({ messages: history.current.slice(-16) }),
+      });
+      clearTimeout(timer);
+      if (!res.ok) throw new Error(`http_${res.status}`);
+      const data = await res.json();
+      const reply = typeof data?.reply === "string" ? data.reply.trim() : "";
+      if (!reply) throw new Error("empty_reply");
+      history.current.push({ role: "assistant", content: reply });
+      setTyping(false);
+      setMessages((m) => [...m, { from: "bot", text: reply }]);
+      setOptions([{ label: "Prendre rendez-vous", next: "rdv" }]);
+    } catch {
+      const fb = offlineAnswer(question);
+      setTyping(false);
+      fb.texts.forEach((t) => history.current.push({ role: "assistant", content: t }));
+      setMessages((m) => [...m, ...fb.texts.map((t) => ({ from: "bot" as const, text: t }))]);
+      setOptions(fb.options);
+    }
+  };
+
+  const send = () => {
+    const text = input.trim();
+    if (!text || typing) return;
+    setInput("");
+    history.current.push({ role: "user", content: text });
+    setMessages((m) => [...m, { from: "user", text }]);
+    askAi(text);
+  };
+
   const choose = (o: Option) => {
     if (o.href) {
       window.open(o.href, o.href.startsWith("http") ? "_blank" : "_self");
       return;
     }
+    history.current.push({ role: "user", content: o.label });
     setMessages((m) => [...m, { from: "user", text: o.label }]);
     if (o.next) go(o.next);
   };
@@ -313,7 +414,7 @@ export default function Conseillere() {
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        aria-label={open ? "Fermer la conseillère virtuelle" : "Ouvrir la conseillère virtuelle"}
+        aria-label={open ? "Fermer la conseillère virtuelle" : "Ouvrir la conseillère virtuelle Élise"}
         className="fixed bottom-6 right-6 z-[70] flex h-16 w-16 items-center justify-center rounded-full bg-ink text-gold shadow-[0_18px_45px_-12px_rgba(17,17,17,0.45)] transition-all duration-500 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] hover:scale-105 hover:bg-gold-deep hover:text-ivory md:bottom-8 md:right-8"
       >
         {open ? (
@@ -331,24 +432,24 @@ export default function Conseillere() {
       {/* Fenêtre de conversation */}
       <div
         role="dialog"
-        aria-label="Conseillère virtuelle MADAMOON"
+        aria-label="Élise, conseillère virtuelle MADAMOON"
         aria-hidden={!open}
         className={`fixed z-[70] flex flex-col overflow-hidden border border-line bg-ivory shadow-[0_40px_90px_-30px_rgba(17,17,17,0.4)] transition-all duration-600 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] ${
           open
             ? "translate-y-0 opacity-100"
             : "pointer-events-none translate-y-6 opacity-0"
-        } inset-x-0 bottom-0 top-16 md:inset-auto md:bottom-28 md:right-8 md:h-[620px] md:max-h-[calc(100dvh-9rem)] md:w-[400px]`}
+        } inset-x-0 bottom-0 top-14 md:inset-auto md:bottom-28 md:right-8 md:h-[640px] md:max-h-[calc(100dvh-9rem)] md:w-[400px]`}
       >
         {/* En-tête */}
-        <div className="flex items-center gap-4 border-b border-line bg-pearl px-6 py-5">
-          <span className="flex h-10 w-10 items-center justify-center rounded-full border border-gold font-serif text-base italic text-gold-deep" aria-hidden>
-            M
+        <div className="flex items-center gap-4 border-b border-line bg-pearl px-6 py-4">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-gold bg-ivory font-serif text-base italic text-gold-deep" aria-hidden>
+            É
           </span>
           <div>
-            <p className="font-serif text-lg leading-tight text-ink">Conseillère Madamoon</p>
+            <p className="font-serif text-lg leading-tight text-ink">Élise</p>
             <p className="mt-0.5 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.2em] text-ink-soft">
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-gold" aria-hidden />
-              À votre écoute
+              Conseillère Madamoon
             </p>
           </div>
           <button
@@ -367,17 +468,17 @@ export default function Conseillere() {
         <div ref={listRef} data-lenis-prevent className="flex-1 space-y-4 overflow-y-auto px-5 py-6">
           {messages.map((m, i) =>
             m.from === "bot" ? (
-              <div key={i} className="max-w-[85%] border border-line bg-pearl px-4 py-3 text-[13.5px] font-light leading-relaxed text-ink">
+              <div key={i} className="max-w-[88%] whitespace-pre-line border border-line bg-pearl px-4 py-3 text-[13.5px] font-light leading-relaxed text-ink">
                 {m.rich ?? m.text}
               </div>
             ) : (
-              <div key={i} className="ml-auto max-w-[85%] bg-ink px-4 py-3 text-[13.5px] font-light leading-relaxed text-ivory">
+              <div key={i} className="ml-auto max-w-[88%] bg-ink px-4 py-3 text-[13.5px] font-light leading-relaxed text-ivory">
                 {m.text}
               </div>
             )
           )}
           {typing && (
-            <div className="flex w-max items-center gap-1.5 border border-line bg-pearl px-4 py-3" aria-label="La conseillère écrit">
+            <div className="flex w-max items-center gap-1.5 border border-line bg-pearl px-4 py-3" aria-label="Élise écrit">
               {[0, 1, 2].map((i) => (
                 <span
                   key={i}
@@ -391,19 +492,48 @@ export default function Conseillere() {
 
         {/* Choix rapides */}
         {options.length > 0 && (
-          <div className="flex flex-wrap gap-2 border-t border-line bg-ivory px-5 py-4">
+          <div className="flex flex-wrap gap-2 border-t border-line bg-ivory px-5 py-3">
             {options.map((o) => (
               <button
                 key={o.label}
                 type="button"
                 onClick={() => choose(o)}
-                className="border border-gold px-4 py-2.5 text-[11px] font-medium uppercase tracking-[0.15em] text-ink transition-all duration-400 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] hover:scale-[1.02] hover:bg-gold hover:text-ink"
+                className="border border-gold px-3.5 py-2 text-[10.5px] font-medium uppercase tracking-[0.14em] text-ink transition-all duration-400 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] hover:scale-[1.02] hover:bg-gold hover:text-ink"
               >
                 {o.label}
               </button>
             ))}
           </div>
         )}
+
+        {/* Saisie libre */}
+        <form
+          className="flex items-center gap-3 border-t border-line bg-pearl px-4 py-3"
+          onSubmit={(e) => {
+            e.preventDefault();
+            send();
+          }}
+        >
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Écrivez à Élise…"
+            aria-label="Votre message pour Élise"
+            enterKeyHint="send"
+            className="min-w-0 flex-1 bg-transparent py-2 text-[14px] font-light text-ink outline-none placeholder:text-ink-soft/60"
+          />
+          <button
+            type="submit"
+            aria-label="Envoyer"
+            disabled={!input.trim() || typing}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-ink text-gold transition-all duration-400 [transition-timing-function:cubic-bezier(0.22,1,0.36,1)] enabled:hover:scale-105 enabled:hover:bg-gold-deep enabled:hover:text-ivory disabled:opacity-30"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden>
+              <path d="M4 12h15M13 6l6 6-6 6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </form>
       </div>
     </>
   );
