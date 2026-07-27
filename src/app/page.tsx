@@ -1,4 +1,5 @@
 import Animations from "@/components/Animations";
+import Conseillere from "@/components/Conseillere";
 import Nav from "@/components/Nav";
 import Hero from "@/components/sections/Hero";
 import Story from "@/components/sections/Story";
@@ -26,6 +27,7 @@ export default function Home() {
         <FinalCta />
       </main>
       <Footer />
+      <Conseillere />
     </>
   );
 }
